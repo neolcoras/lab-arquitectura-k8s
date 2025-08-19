@@ -123,18 +123,44 @@ jobs:
       run: |
         gunzip -c mi-app-image.tar.gz | docker load
 
-    - name: Deploy to Kubernetes
+
+
+    # --- IMPORTANT CHANGE HERE ---
+    # Apply imagePullPolicy: Never BEFORE applying deployment,
+    # or ensure it's in your k8s/deployment.yaml from the start.
+    - name: Configure imagePullPolicy for Minikube # <-- Moved this step UP
       run: |
-        kubectl apply -f k8s/
-        
-    - name: Configure imagePullPolicy for Minikube
-      run: |
+        # Apply the base deployment/service first (without ingress for now)
+        # to ensure the deployment object exists for patching.
+        kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
         kubectl patch deployment mi-app -p '{"spec":{"template":{"spec":{"containers":[{"name":"mi-app","imagePullPolicy":"Never"}]}}}}'
         
-    - name: Wait for rollout
+    - name: Deploy Remaining Kubernetes Resources # <-- New step for clarity
       run: |
+        # Apply any other resources, including ingress, after patching.
+        # This assumes your ingress is in a separate file, e.g., k8s/ingress.yaml
+        # If all were in one 'kubectl apply -f k8s/', consider splitting them or renaming ingress.
+        kubectl apply -f k8s/ingress.yaml # Ensure ingress.yaml is applied here if not in the previous step
+        
+    - name: Wait for rollout # <-- Original rollout wait
+      run: |
+        echo "Waiting for mi-app deployment rollout to finish..."
         kubectl rollout status deployment/mi-app --timeout=300s
         
+    # --- DEBUGGING STEPS ADDED HERE ---
+    - name: Debug Deployment Failure (if rollout times out)
+      if: failure() # Only run this step if the previous step failed
+      run: |
+        echo "Deployment rollout failed. Gathering debugging information..."
+        echo "--- Pods Status ---"
+        kubectl get pods -l app=mi-app
+        echo "--- Pod Events ---"
+        kubectl get events --field-selector involvedObject.kind=Pod,involvedObject.name=$(kubectl get pods -l app=mi-app -o jsonpath='{.items[0].metadata.name}') --sort-by='.lastTimestamp'
+        echo "--- Container Logs (from the first pod) ---"
+        kubectl logs deployment/mi-app --all-containers=true
+        echo "--- Describe Pod (from the first pod) ---"
+        kubectl describe pod $(kubectl get pods -l app=mi-app -o jsonpath='{.items[0].metadata.name}')
+       
     - name: Test deployment
       run: |
         kubectl get pods -l app=mi-app
