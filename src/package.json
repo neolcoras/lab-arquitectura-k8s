@@ -1,0 +1,26 @@
+{
+  "name": "mi-app-k8s",
+  "version": "1.0.0",
+  "description": "Aplicación Node.js para taller de GitHub Actions + Minikube",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.7.0",
+    "supertest": "^6.3.3"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": ["kubernetes", "nodejs", "docker", "ci-cd"],
+  "author": "Renato De La Rosa - Curso Arquitectura Cloud",
+  "license": "MIT"
+}

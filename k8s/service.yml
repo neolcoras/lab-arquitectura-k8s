@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mi-app-service
+  labels:
+    app: mi-app
+spec:
+  selector:
+    app: mi-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+      name: http
+  type: ClusterIP
