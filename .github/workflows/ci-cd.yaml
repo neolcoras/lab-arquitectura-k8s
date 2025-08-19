@@ -132,7 +132,7 @@ jobs:
       run: |
         # Apply the base deployment/service first (without ingress for now)
         # to ensure the deployment object exists for patching.
-        kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
+        kubectl apply -f k8s/deployment.yaml -f k8s/service.yml
         kubectl patch deployment mi-app -p '{"spec":{"template":{"spec":{"containers":[{"name":"mi-app","imagePullPolicy":"Never"}]}}}}'
         
     - name: Deploy Remaining Kubernetes Resources # <-- New step for clarity
