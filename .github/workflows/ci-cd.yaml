@@ -122,6 +122,7 @@ jobs:
     - name: Load Docker image to Minikube
       run: |
         gunzip -c mi-app-image.tar.gz | docker load
+        minikube image load mi-app:latest
 
     - name: Deploy to Kubernetes
       run: |
