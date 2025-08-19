@@ -102,6 +102,19 @@ jobs:
       run: |
         minikube addons enable ingress
 
+    - name: Wait for Ingress Controller to be ready # <-- ¡NUEVO PASO!
+      run: |
+        echo "Waiting for ingress-nginx controller to be ready..."
+        kubectl wait --namespace ingress-nginx \
+          --for=condition=ready pod \
+          --selector=app.kubernetes.io/component=controller \
+          --timeout=300s
+        echo "Ingress controller is ready."  
+        # Opcional: También puedes esperar por el servicio si el anterior no es suficiente
+        # kubectl wait --namespace ingress-nginx \
+        #   --for=condition=available deployment/ingress-nginx-controller \
+        #   --timeout=300s
+
     - name: Set Docker environment for Minikube # <-- Nuevo paso para la alternativa 2
       run: |
         eval $(minikube docker-env)
