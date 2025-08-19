@@ -58,7 +58,7 @@ jobs:
       run: |
         docker build -t $IMAGE_NAME:$IMAGE_TAG .
         docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:latest
-        
+    
     - name: Test Docker image
       run: |
         docker run -d --name test-container -p 3001:3000 $IMAGE_NAME:latest
@@ -97,16 +97,19 @@ jobs:
         minikube-version: 1.32.0
         kubernetes-version: 1.28.3
         driver: docker
-        
+
     - name: Enable Minikube addons
       run: |
         minikube addons enable ingress
-        
+
+    - name: Set Docker environment for Minikube # <-- Nuevo paso para la alternativa 2
+      run: |
+        eval $(minikube docker-env)
+
     - name: Load Docker image to Minikube
       run: |
         gunzip -c mi-app-image.tar.gz | docker load
-        minikube image load mi-app:latest
-        
+
     - name: Deploy to Kubernetes
       run: |
         kubectl apply -f k8s/
