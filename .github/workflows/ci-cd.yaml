@@ -123,24 +123,9 @@ jobs:
       run: |
         gunzip -c mi-app-image.tar.gz | docker load
 
-
-
-    # --- IMPORTANT CHANGE HERE ---
-    # Apply imagePullPolicy: Never BEFORE applying deployment,
-    # or ensure it's in your k8s/deployment.yaml from the start.
-    - name: Configure imagePullPolicy for Minikube # <-- Moved this step UP
+    - name: Deploy to Kubernetes
       run: |
-        # Apply the base deployment/service first (without ingress for now)
-        # to ensure the deployment object exists for patching.
-        kubectl apply -f k8s/deployment.yaml -f k8s/service.yml
-        kubectl patch deployment mi-app -p '{"spec":{"template":{"spec":{"containers":[{"name":"mi-app","imagePullPolicy":"Never"}]}}}}'
-        
-    - name: Deploy Remaining Kubernetes Resources # <-- New step for clarity
-      run: |
-        # Apply any other resources, including ingress, after patching.
-        # This assumes your ingress is in a separate file, e.g., k8s/ingress.yaml
-        # If all were in one 'kubectl apply -f k8s/', consider splitting them or renaming ingress.
-        kubectl apply -f k8s/ingress.yaml # Ensure ingress.yaml is applied here if not in the previous step
+        kubectl apply -f k8s/ # Esto aplicará tus manifiestos K8s, incluyendo deployment.yaml con imagePullPolicy: Never
         
     - name: Wait for rollout # <-- Original rollout wait
       run: |
