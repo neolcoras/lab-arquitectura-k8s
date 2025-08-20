@@ -154,11 +154,18 @@ jobs:
 
     - name: Update deployment with new image
       run: |
-        # Extraer el primer tag (que incluye el SHA)
-        FULL_IMAGE_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
-        echo "Using image: $FULL_IMAGE_TAG"
-        sed -i "s|image: mi-app:latest|image: $FULL_IMAGE_TAG|g" k8s/deployment.yaml
-        cat k8s/deployment.yaml  
+        echo "Before substitution:"
+        cat k8s/deployment.yaml
+        echo "Updating deployment with image: ${{ steps.get-tag.outputs.FULL_IMAGE }}"
+        sed -i "s|image: mi-app:latest|image: ${{ steps.get-tag.outputs.FULL_IMAGE }}|g" k8s/deployment.yaml
+        echo "After substitution:"
+        cat k8s/deployment.yaml
+        # Verificar que la sustitución funcionó
+        if ! grep -q "${{ steps.get-tag.outputs.FULL_IMAGE }}" k8s/deployment.yaml; then
+          echo "❌ Error: Image substitution failed!"
+          exit 1
+        fi
+        echo "✅ Image substitution successful"
 
 
     - name: Deploy service and deployment first
