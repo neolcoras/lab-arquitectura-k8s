@@ -66,9 +66,17 @@ jobs:
           BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///')
           TAG="${BRANCH_NAME}-${{ github.sha }}"
         fi
+        FULL_IMAGE="${{ env.IMAGE_NAME }}:${TAG}"
+        
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
-        echo "full-image=${{ env.IMAGE_NAME }}:${TAG}" >> $GITHUB_OUTPUT
+        echo "full-image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
+        
         echo "Generated tag: ${TAG}"
+        echo "Full image: ${FULL_IMAGE}"
+        
+        # También almacenar en variables de entorno para este job
+        echo "TAG=${TAG}" >> $GITHUB_ENV
+        echo "FULL_IMAGE=${FULL_IMAGE}" >> $GITHUB_ENV
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -88,7 +96,7 @@ jobs:
         platforms: linux/amd64,linux/arm64
         push: true
         tags: |
-          ${{ steps.generate-tag.outputs.full-image }}
+          ${{ env.FULL_IMAGE }}
           ${{ env.IMAGE_NAME }}:latest
         cache-from: type=gha
         cache-to: type=gha,mode=max
@@ -113,8 +121,8 @@ jobs:
       run: |
         echo "Waiting for image to be available in registry..."
         sleep 30
-        docker pull ${{ steps.generate-tag.outputs.full-image }}
-        echo "✅ Image verified in registry: ${{ steps.generate-tag.outputs.full-image }}"
+        docker pull ${{ env.FULL_IMAGE }}
+        echo "✅ Image verified in registry: ${{ env.FULL_IMAGE }}"
 
   deploy:
     runs-on: ubuntu-latest
@@ -158,33 +166,124 @@ jobs:
           --docker-email=${{ secrets.DOCKER_EMAIL || 'user@example.com' }} \
           --dry-run=client -o yaml | kubectl apply -f -
 
-    - name: Deploy service first
+    - name: Debug and prepare image info
       run: |
-        kubectl apply -f k8s/service.yml
-
+        echo "=== DEBUG INFORMATION ==="
+        echo "GitHub ref: ${{ github.ref }}"
+        echo "GitHub SHA: ${{ github.sha }}"
+        echo "Build job outputs:"
+        echo "  - image-tag: '${{ needs.build-and-push.outputs.image-tag }}'"
+        echo "  - full-image: '${{ needs.build-and-push.outputs.full-image }}'"
+        
+        # Generar la imagen dinámicamente como fallback
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          FALLBACK_TAG="main-${{ github.sha }}"
+        else
+          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///')
+          FALLBACK_TAG="${BRANCH_NAME}-${{ github.sha }}"
+        fi
+        
+        FALLBACK_IMAGE="${{ env.IMAGE_NAME }}:${FALLBACK_TAG}"
+        
+        # Usar el output del job anterior si está disponible, sino usar fallback
+        if [[ -n "${{ needs.build-and-push.outputs.full-image }}" ]]; then
+          DEPLOY_IMAGE="${{ needs.build-and-push.outputs.full-image }}"
+          echo "Using image from build job: ${DEPLOY_IMAGE}"
+        else
+          DEPLOY_IMAGE="${FALLBACK_IMAGE}"
+          echo "Using fallback image: ${DEPLOY_IMAGE}"
+        fi
+        
+        echo "DEPLOY_IMAGE=${DEPLOY_IMAGE}" >> $GITHUB_ENV
+        echo "Final image to deploy: ${DEPLOY_IMAGE}"
 
     - name: Deploy and update with correct image
       run: |
-        echo "Using image: ${{ needs.build-and-push.outputs.full-image }}"
+        echo "Using image: $DEPLOY_IMAGE"
         
-        # Primero aplicar el deployment base
-        kubectl apply -f k8s/deployment.yaml
-        
-        # Luego actualizar la imagen específica usando kubectl patch
-        kubectl patch deployment mi-app -p='{"spec":{"template":{"spec":{"containers":[{"name":"mi-app","image":"${{ needs.build-and-push.outputs.full-image }}"}]}}}}'
-        
-        # Verificar que el patch funcionó
-        CURRENT_IMAGE=$(kubectl get deployment mi-app -o jsonpath='{.spec.template.spec.containers[0].image}')
-        echo "Current image in deployment: $CURRENT_IMAGE"
-        
-        if [[ "$CURRENT_IMAGE" == "${{ needs.build-and-push.outputs.full-image }}" ]]; then
-          echo "✅ Image updated successfully"
-        else
-          echo "❌ Image update failed!"
-          echo "Expected: ${{ needs.build-and-push.outputs.full-image }}"
-          echo "Got: $CURRENT_IMAGE"
+        if [[ -z "$DEPLOY_IMAGE" ]]; then
+          echo "❌ Error: DEPLOY_IMAGE is empty!"
           exit 1
         fi
+        
+        # Primero aplicar el service
+        kubectl apply -f k8s/service.yml
+        
+        # Crear el deployment dinámicamente con la imagen correcta
+        cat > k8s/deployment-final.yaml << EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: mi-app
+          labels:
+            app: mi-app
+        spec:
+          replicas: 3
+          selector:
+            matchLabels:
+              app: mi-app
+          template:
+            metadata:
+              labels:
+                app: mi-app
+            spec:
+              imagePullSecrets:
+              - name: docker-hub-secret
+              containers:
+              - name: mi-app
+                image: ${DEPLOY_IMAGE}
+                ports:
+                - containerPort: 3000
+                env:
+                - name: NODE_ENV
+                  value: "production"
+                - name: PORT
+                  value: "3000"
+                resources:
+                  requests:
+                    memory: "128Mi"
+                    cpu: "100m"
+                  limits:
+                    memory: "256Mi"
+                    cpu: "200m"
+                livenessProbe:
+                  httpGet:
+                    path: /health
+                    port: 3000
+                  initialDelaySeconds: 30
+                  periodSeconds: 30
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 3000
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+        EOF
+        
+        echo "Generated deployment file:"
+        cat k8s/deployment-final.yaml
+        
+        # Validar el YAML
+        kubectl apply --dry-run=client -f k8s/deployment-final.yaml
+        
+        # Aplicar el deployment
+        kubectl apply -f k8s/deployment-final.yaml
+        
+        # Verificar que se creó correctamente
+        DEPLOYED_IMAGE=$(kubectl get deployment mi-app -o jsonpath='{.spec.template.spec.containers[0].image}' || echo "ERROR")
+        echo "Deployed image: ${DEPLOYED_IMAGE}"
+        
+        if [[ "$DEPLOYED_IMAGE" == "$DEPLOY_IMAGE" ]]; then
+          echo "✅ Deployment created successfully with correct image"
+        else
+          echo "❌ Deployment created but with wrong image!"
+          echo "Expected: $DEPLOY_IMAGE"
+          echo "Got: $DEPLOYED_IMAGE"
+          exit 1
+        fi
+        
+        echo "Waiting a moment for deployment to start..."
+        sleep 10
 
     - name: Wait for deployment rollout
       run: |
@@ -210,7 +309,7 @@ jobs:
         kubectl logs deployment/mi-app --all-containers=true --previous=true || echo "No previous logs"
         kubectl logs deployment/mi-app --all-containers=true || echo "No current logs"
         echo "--- Docker Hub Image Check ---"
-        docker pull ${{ needs.build-and-push.outputs.full-image }} || echo "Failed to pull image from Docker Hub"
+        docker pull $DEPLOY_IMAGE || echo "Failed to pull image from Docker Hub"
 
     - name: Deploy ingress after everything is ready
       run: |
@@ -246,5 +345,5 @@ jobs:
 
     - name: Show deployed image info
       run: |
-        echo "🚀 Successfully deployed image: ${{ needs.build-and-push.outputs.full-image }}"
+        echo "🚀 Successfully deployed image: $DEPLOY_IMAGE"
         kubectl get deployment mi-app -o jsonpath='{.spec.template.spec.containers[0].image}'
