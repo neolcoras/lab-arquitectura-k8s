@@ -158,39 +158,33 @@ jobs:
           --docker-email=${{ secrets.DOCKER_EMAIL || 'user@example.com' }} \
           --dry-run=client -o yaml | kubectl apply -f -
 
-    - name: Update deployment with new image
-      run: |
-        echo "Using image from build job: ${{ needs.build-and-push.outputs.full-image }}"
-        echo "Before substitution:"
-        cat k8s/deployment.yaml
-        
-        sed -i "s|image: mi-app:latest|image: ${{ needs.build-and-push.outputs.full-image }}|g" k8s/deployment.yaml
-        
-        # También actualizar imagePullSecrets si no existe
-        if ! grep -q "imagePullSecrets" k8s/deployment.yaml; then
-          sed -i '/spec:/,/containers:/ { /containers:/ i\      imagePullSecrets:\n      - name: docker-hub-secret
-          }' k8s/deployment.yaml
-        fi
-        
-        echo "After substitution:"
-        cat k8s/deployment.yaml
-        
-        # Verificar que la sustitución funcionó
-        if ! grep -q "${{ needs.build-and-push.outputs.full-image }}" k8s/deployment.yaml; then
-          echo "❌ Error: Image substitution failed!"
-          exit 1
-        fi
-        echo "✅ Image substitution successful"
-
     - name: Deploy service first
       run: |
         kubectl apply -f k8s/service.yml
 
-    - name: Deploy application
+
+    - name: Deploy and update with correct image
       run: |
+        echo "Using image: ${{ needs.build-and-push.outputs.full-image }}"
+        
+        # Primero aplicar el deployment base
         kubectl apply -f k8s/deployment.yaml
-        echo "Waiting a moment for deployment to start..."
-        sleep 10
+        
+        # Luego actualizar la imagen específica usando kubectl patch
+        kubectl patch deployment mi-app -p='{"spec":{"template":{"spec":{"containers":[{"name":"mi-app","image":"${{ needs.build-and-push.outputs.full-image }}"}]}}}}'
+        
+        # Verificar que el patch funcionó
+        CURRENT_IMAGE=$(kubectl get deployment mi-app -o jsonpath='{.spec.template.spec.containers[0].image}')
+        echo "Current image in deployment: $CURRENT_IMAGE"
+        
+        if [[ "$CURRENT_IMAGE" == "${{ needs.build-and-push.outputs.full-image }}" ]]; then
+          echo "✅ Image updated successfully"
+        else
+          echo "❌ Image update failed!"
+          echo "Expected: ${{ needs.build-and-push.outputs.full-image }}"
+          echo "Got: $CURRENT_IMAGE"
+          exit 1
+        fi
 
     - name: Wait for deployment rollout
       run: |
