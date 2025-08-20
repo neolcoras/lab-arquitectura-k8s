@@ -9,7 +9,6 @@ on:
 env:
   REGISTRY: docker.io
   IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/mi-app-k8s
-  IMAGE_TAG: ${{ github.sha }}
   NODE_VERSION: '16'
 
 jobs:
@@ -50,10 +49,26 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     needs: test
+    outputs:
+      image-tag: ${{ steps.generate-tag.outputs.tag }}
+      full-image: ${{ steps.generate-tag.outputs.full-image }}
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Generate consistent tag
+      id: generate-tag
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          TAG="main-${{ github.sha }}"
+        else
+          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///')
+          TAG="${BRANCH_NAME}-${{ github.sha }}"
+        fi
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+        echo "full-image=${{ env.IMAGE_NAME }}:${TAG}" >> $GITHUB_OUTPUT
+        echo "Generated tag: ${TAG}"
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -65,18 +80,6 @@ jobs:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.IMAGE_NAME }}
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
-
-       
     - name: Build and push Docker image
       id: build
       uses: docker/build-push-action@v5
@@ -84,11 +87,11 @@ jobs:
         context: .
         platforms: linux/amd64,linux/arm64
         push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
+        tags: |
+          ${{ steps.generate-tag.outputs.full-image }}
+          ${{ env.IMAGE_NAME }}:latest
         cache-from: type=gha
         cache-to: type=gha,mode=max
-        outputs: type=image,name=target,annotation-index.org.opencontainers.image.description=Local test image
         
     - name: Build local test image
       uses: docker/build-push-action@v5
@@ -105,6 +108,13 @@ jobs:
         curl -f http://localhost:3001/health || exit 1
         docker stop test-container
         docker rm test-container
+
+    - name: Verify image in registry
+      run: |
+        echo "Waiting for image to be available in registry..."
+        sleep 30
+        docker pull ${{ steps.generate-tag.outputs.full-image }}
+        echo "✅ Image verified in registry: ${{ steps.generate-tag.outputs.full-image }}"
 
   deploy:
     runs-on: ubuntu-latest
@@ -138,61 +148,75 @@ jobs:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Get image tag from build job
-      id: get-tag
+    - name: Configure Docker credentials for Minikube
       run: |
-        # Construir el tag basado en la branch y SHA
-        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-          IMAGE_TAG="main-${{ github.sha }}"
-        else
-          BRANCH_NAME=$(echo "${{ github.ref }}" | sed 's/refs\/heads\///')
-          IMAGE_TAG="${BRANCH_NAME}-${{ github.sha }}"
-        fi
-        echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-        echo "FULL_IMAGE=${{ env.IMAGE_NAME }}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
-        echo "Using image: ${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
+        # Configurar credenciales de Docker en Minikube
+        kubectl create secret docker-registry docker-hub-secret \
+          --docker-server=docker.io \
+          --docker-username=${{ secrets.DOCKER_USERNAME }} \
+          --docker-password=${{ secrets.DOCKER_PASSWORD }} \
+          --docker-email=${{ secrets.DOCKER_EMAIL || 'user@example.com' }} \
+          --dry-run=client -o yaml | kubectl apply -f -
 
     - name: Update deployment with new image
       run: |
+        echo "Using image from build job: ${{ needs.build-and-push.outputs.full-image }}"
         echo "Before substitution:"
         cat k8s/deployment.yaml
-        echo "Updating deployment with image: ${{ steps.get-tag.outputs.FULL_IMAGE }}"
-        sed -i "s|image: mi-app:latest|image: ${{ steps.get-tag.outputs.FULL_IMAGE }}|g" k8s/deployment.yaml
+        
+        sed -i "s|image: mi-app:latest|image: ${{ needs.build-and-push.outputs.full-image }}|g" k8s/deployment.yaml
+        
+        # También actualizar imagePullSecrets si no existe
+        if ! grep -q "imagePullSecrets" k8s/deployment.yaml; then
+          sed -i '/spec:/,/containers:/ { /containers:/ i\      imagePullSecrets:\n      - name: docker-hub-secret
+          }' k8s/deployment.yaml
+        fi
+        
         echo "After substitution:"
         cat k8s/deployment.yaml
+        
         # Verificar que la sustitución funcionó
-        if ! grep -q "${{ steps.get-tag.outputs.FULL_IMAGE }}" k8s/deployment.yaml; then
+        if ! grep -q "${{ needs.build-and-push.outputs.full-image }}" k8s/deployment.yaml; then
           echo "❌ Error: Image substitution failed!"
           exit 1
         fi
         echo "✅ Image substitution successful"
 
-
-    - name: Deploy service and deployment first
+    - name: Deploy service first
       run: |
         kubectl apply -f k8s/service.yml
-        kubectl apply -f k8s/deployment.yaml
 
+    - name: Deploy application
+      run: |
+        kubectl apply -f k8s/deployment.yaml
+        echo "Waiting a moment for deployment to start..."
+        sleep 10
 
     - name: Wait for deployment rollout
       run: |
-        kubectl rollout status deployment/mi-app --timeout=300s
-        kubectl wait --for=condition=ready pod -l app=mi-app --timeout=300s
+        echo "Waiting for deployment rollout..."
+        kubectl rollout status deployment/mi-app --timeout=600s
+        kubectl wait --for=condition=ready pod -l app=mi-app --timeout=600s
 
     - name: Debug Deployment Failure (if rollout times out)
-      if: failure() # Only run this step if the previous step failed
+      if: failure()
       run: |
         echo "Deployment rollout failed. Gathering debugging information..."
+        echo "--- Deployment Status ---"
+        kubectl get deployment mi-app -o wide
+        echo "--- ReplicaSet Status ---"
+        kubectl get replicaset -l app=mi-app -o wide
         echo "--- Pods Status ---"
-        kubectl get pods -l app=mi-app
+        kubectl get pods -l app=mi-app -o wide
         echo "--- Pod Events ---"
-        kubectl get events --field-selector involvedObject.kind=Pod,involvedObject.name=$(kubectl get pods -l app=mi-app -o jsonpath='{.items[0].metadata.name}') --sort-by='.lastTimestamp'
-        echo "--- Container Logs (from the first pod) ---"
-        kubectl logs deployment/mi-app --all-containers=true
-        echo "--- Describe Pod (from the first pod) ---"
-        kubectl describe pod $(kubectl get pods -l app=mi-app -o jsonpath='{.items[0].metadata.name}')
-
-
+        kubectl get events --field-selector involvedObject.kind=Pod --sort-by='.lastTimestamp' | tail -20
+        echo "--- Pod Descriptions ---"
+        kubectl describe pods -l app=mi-app
+        echo "--- Container Logs (if any) ---"
+        kubectl logs deployment/mi-app --all-containers=true --previous=true || echo "No previous logs"
+        kubectl logs deployment/mi-app --all-containers=true || echo "No current logs"
+        echo "--- Docker Hub Image Check ---"
+        docker pull ${{ needs.build-and-push.outputs.full-image }} || echo "Failed to pull image from Docker Hub"
 
     - name: Deploy ingress after everything is ready
       run: |
@@ -205,11 +229,8 @@ jobs:
         kubectl get services
         kubectl get ingress
                 
-      
     - name: Test deployment
       run: |
-        kubectl get pods -l app=mi-app
-        kubectl get services
         kubectl wait --for=condition=ready pod -l app=mi-app --timeout=300s
         kubectl port-forward service/mi-app-service 8080:80 &
         sleep 15
@@ -231,5 +252,5 @@ jobs:
 
     - name: Show deployed image info
       run: |
-        echo "🚀 Successfully deployed image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+        echo "🚀 Successfully deployed image: ${{ needs.build-and-push.outputs.full-image }}"
         kubectl get deployment mi-app -o jsonpath='{.spec.template.spec.containers[0].image}'
